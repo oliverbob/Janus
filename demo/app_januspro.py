@@ -24,7 +24,10 @@ if torch.cuda.is_available():
 else:
     vl_gpt = vl_gpt.to(torch.float16)
 
-vl_chat_processor = VLChatProcessor.from_pretrained(model_path)
+try:
+    vl_chat_processor = VLChatProcessor.from_pretrained(model_path, use_fast=False)
+except TypeError:
+    vl_chat_processor = VLChatProcessor.from_pretrained(model_path)
 tokenizer = vl_chat_processor.tokenizer
 cuda_device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
