@@ -14,7 +14,7 @@ model_path = "deepseek-ai/Janus-Pro-1B"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 is_cuda = device.type == "cuda"
 model_dtype = torch.bfloat16 if is_cuda else torch.float32
-t2i_parallel_size = int(os.environ.get("JANUS_T2I_PARALLEL_SIZE", "2"))
+t2i_parallel_size = 1
 enable_compile = os.environ.get("JANUS_COMPILE", "0") == "1"
 
 config = AutoConfig.from_pretrained(model_path)
@@ -240,7 +240,7 @@ with gr.Blocks() as demo:
 
     generation_button = gr.Button("Generate Images")
 
-    image_output = gr.Gallery(label="Generated Images", columns=2, rows=2, height=300)
+    image_output = gr.Gallery(label="Generated Images", columns=1, rows=1, height=300)
 
     examples_t2i = gr.Examples(
         label="Text to image generation examples.",
