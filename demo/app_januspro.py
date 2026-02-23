@@ -55,6 +55,15 @@ cuda_device = device
 # @spaces.GPU(duration=120) 
 # Multimodal Understanding function
 def multimodal_understanding(image, question, seed, top_p, temperature):
+    # Clear CUDA cache before generating
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    if image is None:
+        return "Please upload an image first."
+    if not question:
+        return "Please enter a question."
+    
     # set seed
     if seed is not None:
         torch.manual_seed(seed)
@@ -79,18 +88,22 @@ def multimodal_understanding(image, question, seed, top_p, temperature):
     
     inputs_embeds = vl_gpt.prepare_inputs_embeds(**prepare_inputs)
     
-    outputs = vl_gpt.language_model.generate(
-        inputs_embeds=inputs_embeds,
-        attention_mask=prepare_inputs.attention_mask,
-        pad_token_id=tokenizer.eos_token_id,
-        bos_token_id=tokenizer.bos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-        max_new_tokens=128,
-        do_sample=False if temperature == 0 else True,
-        use_cache=True,
-        temperature=temperature,
-        top_p=top_p,
-    )
+    do_sample = temperature > 0
+    generation_kwargs = {
+        "inputs_embeds": inputs_embeds,
+        "attention_mask": prepare_inputs.attention_mask,
+        "pad_token_id": tokenizer.eos_token_id,
+        "bos_token_id": tokenizer.bos_token_id,
+        "eos_token_id": tokenizer.eos_token_id,
+        "max_new_tokens": 128,
+        "do_sample": do_sample,
+        "use_cache": True,
+    }
+    if do_sample:
+        generation_kwargs["temperature"] = temperature
+        generation_kwargs["top_p"] = top_p
+
+    outputs = vl_gpt.language_model.generate(**generation_kwargs)
     
     answer = tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True)
     return answer
