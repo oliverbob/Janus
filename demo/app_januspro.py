@@ -15,6 +15,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 is_cuda = device.type == "cuda"
 model_dtype = torch.bfloat16 if is_cuda else torch.float32
 t2i_parallel_size = 1
+t2i_img_size = int(os.environ.get("JANUS_T2I_IMG_SIZE", "256"))
+t2i_output_size = int(os.environ.get("JANUS_T2I_OUTPUT_SIZE", "512"))
 enable_compile = os.environ.get("JANUS_COMPILE", "0") == "1"
 
 config = AutoConfig.from_pretrained(model_path)
@@ -170,8 +172,9 @@ def generate_image(prompt,
         if is_cuda:
             torch.cuda.manual_seed(seed)
         np.random.seed(seed)
-    width = 384
-    height = 384
+    width = (t2i_img_size // 16) * 16
+    height = (t2i_img_size // 16) * 16
+    image_token_num_per_image = (width // 16) * (height // 16)
     parallel_size = t2i_parallel_size
     
     with torch.no_grad():
@@ -184,17 +187,18 @@ def generate_image(prompt,
         
         input_ids = torch.tensor(tokenizer.encode(text), dtype=torch.long, device=cuda_device)
         output, patches = generate(input_ids,
-                                   width // 16 * 16,
-                                   height // 16 * 16,
+                                   width,
+                                   height,
                                    cfg_weight=guidance,
                                    parallel_size=parallel_size,
+                                   image_token_num_per_image=image_token_num_per_image,
                                    temperature=t2i_temperature)
         images = unpack(patches,
-                        width // 16 * 16,
-                        height // 16 * 16,
+                        width,
+                        height,
                         parallel_size=parallel_size)
 
-        return [Image.fromarray(images[i]).resize((768, 768), Image.LANCZOS) for i in range(parallel_size)]
+        return [Image.fromarray(images[i]).resize((t2i_output_size, t2i_output_size), Image.LANCZOS) for i in range(parallel_size)]
         
 
 # Gradio interface
