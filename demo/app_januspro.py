@@ -198,7 +198,7 @@ def generate_image(prompt,
                         height,
                         parallel_size=parallel_size)
 
-        return [Image.fromarray(images[i]).resize((t2i_output_size, t2i_output_size), Image.LANCZOS) for i in range(parallel_size)]
+        return Image.fromarray(images[0]).resize((t2i_output_size, t2i_output_size), Image.LANCZOS)
         
 
 # Gradio interface
@@ -244,7 +244,7 @@ with gr.Blocks() as demo:
 
     generation_button = gr.Button("Generate Images")
 
-    image_output = gr.Gallery(label="Generated Images", columns=1, rows=1, height=300)
+    image_output = gr.Image(label="Generated Image", type="pil", height=512)
 
     examples_t2i = gr.Examples(
         label="Text to image generation examples.",
