@@ -269,5 +269,8 @@ with gr.Blocks() as demo:
         outputs=image_output
     )
 
-demo.queue(concurrency_count=1, max_size=8).launch(share=False)
+try:
+    demo.queue(concurrency_count=1, max_size=8).launch(share=False)
+except TypeError:
+    demo.queue(default_concurrency_limit=1, max_size=8).launch(share=False)
 # demo.queue(concurrency_count=1, max_size=10).launch(server_name="0.0.0.0", server_port=37906, root_path="/path")
