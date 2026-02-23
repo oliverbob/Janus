@@ -15,14 +15,23 @@ import time
 model_path = "deepseek-ai/Janus-Pro-1B"
 config = AutoConfig.from_pretrained(model_path)
 language_config = config.language_config
-language_config._attn_implementation = 'eager'
+language_config._attn_implementation = "sdpa"
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
+
 vl_gpt = AutoModelForCausalLM.from_pretrained(model_path,
                                              language_config=language_config,
-                                             trust_remote_code=True)
+                                             trust_remote_code=True,
+                                             torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                                             low_cpu_mem_usage=True)
 if torch.cuda.is_available():
-    vl_gpt = vl_gpt.to(torch.bfloat16).cuda()
+    vl_gpt = vl_gpt.cuda()
 else:
-    vl_gpt = vl_gpt.to(torch.float16)
+    vl_gpt = vl_gpt.to(torch.float32)
+vl_gpt = vl_gpt.eval()
 
 vl_chat_processor = VLChatProcessor.from_pretrained(model_path)
 tokenizer = vl_chat_processor.tokenizer
@@ -32,13 +41,11 @@ cuda_device = 'cuda' if torch.cuda.is_available() else 'cpu'
 # @spaces.GPU(duration=120) 
 # Multimodal Understanding function
 def multimodal_understanding(image, question, seed, top_p, temperature):
-    # Clear CUDA cache before generating
-    torch.cuda.empty_cache()
-    
     # set seed
     torch.manual_seed(seed)
     np.random.seed(seed)
-    torch.cuda.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
     
     conversation = [
         {
@@ -63,7 +70,7 @@ def multimodal_understanding(image, question, seed, top_p, temperature):
         pad_token_id=tokenizer.eos_token_id,
         bos_token_id=tokenizer.bos_token_id,
         eos_token_id=tokenizer.eos_token_id,
-        max_new_tokens=512,
+        max_new_tokens=128,
         do_sample=False if temperature == 0 else True,
         use_cache=True,
         temperature=temperature,
@@ -82,9 +89,6 @@ def generate(input_ids,
              cfg_weight: float = 5,
              image_token_num_per_image: int = 576,
              patch_size: int = 16):
-    # Clear CUDA cache before generating
-    torch.cuda.empty_cache()
-    
     tokens = torch.zeros((parallel_size * 2, len(input_ids)), dtype=torch.int).to(cuda_device)
     for i in range(parallel_size * 2):
         tokens[i, :] = input_ids
@@ -137,16 +141,15 @@ def generate_image(prompt,
                    seed=None,
                    guidance=5,
                    t2i_temperature=1.0):
-    # Clear CUDA cache and avoid tracking gradients
-    torch.cuda.empty_cache()
     # Set the seed for reproducible results
     if seed is not None:
         torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
         np.random.seed(seed)
     width = 384
     height = 384
-    parallel_size = 5
+    parallel_size = 2
     
     with torch.no_grad():
         messages = [{'role': '<|User|>', 'content': prompt},
@@ -180,7 +183,7 @@ with gr.Blocks() as demo:
             question_input = gr.Textbox(label="Question")
             und_seed_input = gr.Number(label="Seed", precision=0, value=42)
             top_p = gr.Slider(minimum=0, maximum=1, value=0.95, step=0.05, label="top_p")
-            temperature = gr.Slider(minimum=0, maximum=1, value=0.1, step=0.05, label="temperature")
+            temperature = gr.Slider(minimum=0, maximum=1, value=0.0, step=0.05, label="temperature")
         
     understanding_button = gr.Button("Chat")
     understanding_output = gr.Textbox(label="Response")
@@ -206,8 +209,8 @@ with gr.Blocks() as demo:
     
     
     with gr.Row():
-        cfg_weight_input = gr.Slider(minimum=1, maximum=10, value=5, step=0.5, label="CFG Weight")
-        t2i_temperature = gr.Slider(minimum=0, maximum=1, value=1.0, step=0.05, label="temperature")
+        cfg_weight_input = gr.Slider(minimum=1, maximum=10, value=4, step=0.5, label="CFG Weight")
+        t2i_temperature = gr.Slider(minimum=0, maximum=1, value=0.7, step=0.05, label="temperature")
 
     prompt_input = gr.Textbox(label="Prompt. (Prompt in more detail can help produce better images!)")
     seed_input = gr.Number(label="Seed (Optional)", precision=0, value=12345)
@@ -241,5 +244,5 @@ with gr.Blocks() as demo:
         outputs=image_output
     )
 
-demo.launch(share=True)
+demo.launch(share=False)
 # demo.queue(concurrency_count=1, max_size=10).launch(server_name="0.0.0.0", server_port=37906, root_path="/path")
