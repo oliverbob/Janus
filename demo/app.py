@@ -5,32 +5,60 @@ from janus.models import MultiModalityCausalLM, VLChatProcessor
 from PIL import Image
 
 import numpy as np
+import os
 
 
 # Load model and processor
-model_path = "deepseek-ai/Janus-1.3B"
-config = AutoConfig.from_pretrained(model_path)
+model_path = os.environ.get("JANUS_MODEL_PATH", "deepseek-ai/Janus-1.3B")
+local_files_only = os.environ.get("JANUS_LOCAL_FILES_ONLY", "0") == "1"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+is_cuda = device.type == "cuda"
+model_dtype = torch.bfloat16 if is_cuda else torch.float32
+t2i_parallel_size = int(os.environ.get("JANUS_T2I_PARALLEL_SIZE", "2"))
+
+config = AutoConfig.from_pretrained(model_path, local_files_only=local_files_only)
 language_config = config.language_config
-language_config._attn_implementation = 'eager'
+language_config._attn_implementation = "sdpa"
+
+if is_cuda:
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
+    if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+        torch.backends.cuda.enable_flash_sdp(True)
+    if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+
 vl_gpt = AutoModelForCausalLM.from_pretrained(model_path,
                                              language_config=language_config,
-                                             trust_remote_code=True)
-vl_gpt = vl_gpt.to(torch.bfloat16).cuda()
+                                             trust_remote_code=True,
+                                             torch_dtype=model_dtype,
+                                             low_cpu_mem_usage=True,
+                                             local_files_only=local_files_only)
+vl_gpt = vl_gpt.to(device=device, dtype=model_dtype).eval()
 
-vl_chat_processor = VLChatProcessor.from_pretrained(model_path)
+try:
+    vl_chat_processor = VLChatProcessor.from_pretrained(model_path, use_fast=False, local_files_only=local_files_only)
+except TypeError:
+    vl_chat_processor = VLChatProcessor.from_pretrained(model_path, local_files_only=local_files_only)
 tokenizer = vl_chat_processor.tokenizer
-cuda_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+cuda_device = device
 # Multimodal Understanding function
 @torch.inference_mode()
 # Multimodal Understanding function
 def multimodal_understanding(image, question, seed, top_p, temperature):
-    # Clear CUDA cache before generating
-    torch.cuda.empty_cache()
+    if image is None:
+        return "Please upload an image first."
+    if not question:
+        return "Please enter a question."
     
     # set seed
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    torch.cuda.manual_seed(seed)
+    if seed is not None:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        if is_cuda:
+            torch.cuda.manual_seed(seed)
     
     conversation = [
         {
@@ -44,23 +72,26 @@ def multimodal_understanding(image, question, seed, top_p, temperature):
     pil_images = [Image.fromarray(image)]
     prepare_inputs = vl_chat_processor(
         conversations=conversation, images=pil_images, force_batchify=True
-    ).to(cuda_device, dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float16)
+    ).to(cuda_device, dtype=model_dtype if is_cuda else torch.float32)
     
     
     inputs_embeds = vl_gpt.prepare_inputs_embeds(**prepare_inputs)
     
-    outputs = vl_gpt.language_model.generate(
-        inputs_embeds=inputs_embeds,
-        attention_mask=prepare_inputs.attention_mask,
-        pad_token_id=tokenizer.eos_token_id,
-        bos_token_id=tokenizer.bos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-        max_new_tokens=512,
-        do_sample=False if temperature == 0 else True,
-        use_cache=True,
-        temperature=temperature,
-        top_p=top_p,
-    )
+    do_sample = temperature > 0
+    generation_kwargs = {
+        "inputs_embeds": inputs_embeds,
+        "attention_mask": prepare_inputs.attention_mask,
+        "pad_token_id": tokenizer.eos_token_id,
+        "bos_token_id": tokenizer.bos_token_id,
+        "eos_token_id": tokenizer.eos_token_id,
+        "max_new_tokens": 128,
+        "do_sample": do_sample,
+        "use_cache": True,
+    }
+    if do_sample:
+        generation_kwargs["temperature"] = temperature
+        generation_kwargs["top_p"] = top_p
+    outputs = vl_gpt.language_model.generate(**generation_kwargs)
     
     answer = tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True)
     return answer
@@ -74,16 +105,10 @@ def generate(input_ids,
              cfg_weight: float = 5,
              image_token_num_per_image: int = 576,
              patch_size: int = 16):
-    # Clear CUDA cache before generating
-    torch.cuda.empty_cache()
-    
-    tokens = torch.zeros((parallel_size * 2, len(input_ids)), dtype=torch.int).to(cuda_device)
-    for i in range(parallel_size * 2):
-        tokens[i, :] = input_ids
-        if i % 2 != 0:
-            tokens[i, 1:-1] = vl_chat_processor.pad_id
+    tokens = input_ids.unsqueeze(0).repeat(parallel_size * 2, 1).to(cuda_device, non_blocking=True)
+    tokens[1::2, 1:-1] = vl_chat_processor.pad_id
     inputs_embeds = vl_gpt.language_model.get_input_embeddings()(tokens)
-    generated_tokens = torch.zeros((parallel_size, image_token_num_per_image), dtype=torch.int).to(cuda_device)
+    generated_tokens = torch.empty((parallel_size, image_token_num_per_image), dtype=torch.int, device=cuda_device)
 
     pkv = None
     for i in range(image_token_num_per_image):
@@ -96,8 +121,11 @@ def generate(input_ids,
         logit_cond = logits[0::2, :]
         logit_uncond = logits[1::2, :]
         logits = logit_uncond + cfg_weight * (logit_cond - logit_uncond)
-        probs = torch.softmax(logits / temperature, dim=-1)
-        next_token = torch.multinomial(probs, num_samples=1)
+        if temperature <= 0:
+            next_token = torch.argmax(logits, dim=-1, keepdim=True)
+        else:
+            probs = torch.softmax(logits / temperature, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
         generated_tokens[:, i] = next_token.squeeze(dim=-1)
         next_token = torch.cat([next_token.unsqueeze(dim=1), next_token.unsqueeze(dim=1)], dim=1).view(-1)
         img_embeds = vl_gpt.prepare_gen_img_embeds(next_token)
@@ -110,11 +138,7 @@ def generate(input_ids,
 def unpack(dec, width, height, parallel_size=5):
     dec = dec.to(torch.float32).cpu().numpy().transpose(0, 2, 3, 1)
     dec = np.clip((dec + 1) / 2 * 255, 0, 255)
-
-    visual_img = np.zeros((parallel_size, width, height, 3), dtype=np.uint8)
-    visual_img[:, :, :] = dec
-
-    return visual_img
+    return dec.astype(np.uint8)
 
 
 
@@ -122,16 +146,15 @@ def unpack(dec, width, height, parallel_size=5):
 def generate_image(prompt,
                    seed=None,
                    guidance=5):
-    # Clear CUDA cache and avoid tracking gradients
-    torch.cuda.empty_cache()
     # Set the seed for reproducible results
     if seed is not None:
         torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
+        if is_cuda:
+            torch.cuda.manual_seed(seed)
         np.random.seed(seed)
     width = 384
     height = 384
-    parallel_size = 5
+    parallel_size = t2i_parallel_size
     
     with torch.no_grad():
         messages = [{'role': 'User', 'content': prompt},
@@ -140,7 +163,7 @@ def generate_image(prompt,
                                                                    sft_format=vl_chat_processor.sft_format,
                                                                    system_prompt='')
         text = text + vl_chat_processor.image_start_tag
-        input_ids = torch.LongTensor(tokenizer.encode(text))
+        input_ids = torch.tensor(tokenizer.encode(text), dtype=torch.long, device=cuda_device)
         output, patches = generate(input_ids,
                                    width // 16 * 16,
                                    height // 16 * 16,
@@ -221,4 +244,7 @@ with gr.Blocks() as demo:
         outputs=image_output
     )
 
-demo.launch(share=True)
+try:
+    demo.queue(concurrency_count=1, max_size=8).launch(share=False)
+except TypeError:
+    demo.queue(default_concurrency_limit=1, max_size=8).launch(share=False)
