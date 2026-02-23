@@ -298,6 +298,35 @@ pip install -e .[gradio]
 python demo/app_januspro.py
 ```
 
+### RTX 4090 Fast Setup (Minimum)
+
+For best speed on an RTX 4090, use this minimum software stack:
+
+- NVIDIA Driver: `>= 550`
+- CUDA Runtime: `12.1+`
+- Python: `3.10` or `3.11`
+- PyTorch: `>= 2.3` (CUDA build)
+- Transformers: `>= 4.38`
+
+Recommended install example:
+
+```bash
+pip uninstall -y torch torchvision torchaudio
+pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio
+pip install -e .[gradio]
+```
+
+Run with performance flags:
+
+```bash
+JANUS_T2I_PARALLEL_SIZE=4 JANUS_COMPILE=1 python demo/app_januspro.py
+```
+
+Notes:
+
+- `JANUS_T2I_PARALLEL_SIZE=4` usually gives better throughput on 24GB VRAM.
+- If startup compile time is too long, set `JANUS_COMPILE=0`.
+
 Have Fun!
 
 </details>
