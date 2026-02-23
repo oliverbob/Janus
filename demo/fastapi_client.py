@@ -1,9 +1,11 @@
 import requests
 from PIL import Image
 import io
+import os
 # Endpoint URLs
-understand_image_url = "http://localhost:8000/understand_image_and_question/"
-generate_images_url = "http://localhost:8000/generate_images/"
+base_url = os.environ.get("JANUS_FASTAPI_BASE_URL", "http://localhost:8001")
+understand_image_url = f"{base_url}/understand_image_and_question/"
+generate_images_url = f"{base_url}/generate_images/"
 
 # Use your image file path here
 image_path = "images/equation.png"
@@ -17,9 +19,22 @@ def understand_image_and_question(image_path, question, seed=42, top_p=0.95, tem
         'top_p': top_p,
         'temperature': temperature
     }
-    response = requests.post(understand_image_url, files=files, data=data)
-    response_data = response.json()
-    print("Image Understanding Response:", response_data['response'])
+    try:
+        response = requests.post(understand_image_url, files=files, data=data, timeout=600)
+        try:
+            response_data = response.json()
+        except ValueError:
+            response_data = {"raw": response.text}
+
+        if response.ok and 'response' in response_data:
+            print("Image Understanding Response:", response_data['response'])
+            return response_data['response']
+
+        error_detail = response_data.get('detail') or response_data.get('raw') or str(response_data)
+        print(f"Image Understanding Request Failed ({response.status_code}): {error_detail}")
+        return None
+    finally:
+        files['file'].close()
 
 
 # Function to call the text-to-image generation endpoint
